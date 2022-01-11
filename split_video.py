@@ -1,17 +1,17 @@
 #!/usr/bin/env python
 import json
+import os
 import re
-from pathlib import PurePath, Path
-from typing import Optional, AnyStr, List, Dict, Union
-from datetime import timedelta
-from subprocess import Popen, PIPE
 from argparse import ArgumentParser
-from hashlib import sha256
-
 from dataclasses import dataclass, field
+from datetime import timedelta
+from hashlib import sha256
+from pathlib import Path, PurePath
+from subprocess import PIPE, Popen
+from typing import AnyStr, Callable, Dict, List, Optional, Union
 
 import toml
-from dataclasses_json import dataclass_json, config, LetterCase
+from dataclasses_json import LetterCase, config, dataclass_json
 from tabulate import tabulate
 
 
@@ -21,11 +21,6 @@ class TimeDeltaHelper:
 
     @staticmethod
     def from_str(delta_str=AnyStr) -> Optional[timedelta]:
-        """
-        解析
-        :param delta_str:
-        :return:
-        """
         if not delta_str:
             return None
 
@@ -84,12 +79,6 @@ class ProjectSpec:
               videos: List[VideoInfo],
               max_part_length: Optional[timedelta] = None,
               latest_part_greedy: Optional[float] = None) -> List[VideoPart]:
-        """
-        file1: 21:30
-        file2: 15:00
-        file3: 45:00
-        durations [21:30, 36:30, 01:20:30]
-        """
         durations: List[timedelta] = []
         for video_info in videos:
             if not durations:
@@ -211,6 +200,7 @@ def main():
         videos: List[VideoInfo] = [VideoInfo(file, FFMpeg.get_video_duration(project.workdir / file, cfg.ffprobe_bin))
                                    for file in project.files]
         input_file: Union[List[str], str] = [str(project.workdir / file) for file in project.files]
+        post_splited: Optional[Callable] = None
         if not args.dry_run and cfg.re_mux_at_first:
             content = '\n'.join([str(project.workdir / v.filename) for v in videos])
             h = sha256()
@@ -226,6 +216,7 @@ def main():
                 )
             videos = [VideoInfo(re_mux_file, FFMpeg.get_video_duration(project.workdir / re_mux_file, cfg.ffprobe_bin))]
             input_file = str(project.workdir / re_mux_file)
+            post_splited = lambda: os.remove(project.workdir / re_mux_file)
 
         video_parts: List[VideoPart] = project.split(videos, max_part_length=cfg.max_part_length,
                                                      latest_part_greedy=cfg.latest_part_greedy)
@@ -242,6 +233,8 @@ def main():
                 to=str(vp.end),
                 **project.ffmpeg_args
             )
+        if post_splited:
+            post_splited()
 
 
 if __name__ == '__main__':
