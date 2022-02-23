@@ -75,65 +75,6 @@ class ProjectSpec:
     parts: List[PartSpec] = None
     ffmpeg_args: Dict[str, Optional[str]] = field(default_factory=lambda: {'c': 'copy'})
 
-    def split(self,
-              videos: List[VideoInfo],
-              max_part_length: Optional[timedelta] = None,
-              latest_part_greedy: Optional[float] = None) -> List[VideoPart]:
-        durations: List[timedelta] = []
-        for video_info in videos:
-            if not durations:
-                durations.append(video_info.duration)
-            else:
-                durations.append(durations[-1] + video_info.duration)
-
-        res: List[VideoPart] = []
-        for idx, part in enumerate(self.parts):
-            if not part.start:
-                if idx == 0:
-                    st = timedelta()
-                else:
-                    st = res[-1].end
-            elif not part.start_idx or part.start == 1:
-                st = part.start
-            else:
-                st = durations[part.start_idx - 2] + part.start
-
-            if not part.end:
-                if idx == len(self.parts) - 1:
-                    et = durations[-1]
-                else:
-                    raise RuntimeError('未指定结束时间')
-            elif not part.end_idx or part.end_idx == 1:
-                et = part.end
-            else:
-                et = durations[part.end_idx - 2] + part.end
-
-            current_part_duration = et - st
-            assert current_part_duration.total_seconds() > 0
-            if not max_part_length or current_part_duration < max_part_length * (
-                    1 + latest_part_greedy if latest_part_greedy else 0):
-                res.append(VideoPart(name=part.name, start=st, end=et))
-                continue
-
-            part_num = int(current_part_duration / max_part_length)
-            if not latest_part_greedy or current_part_duration % max_part_length > (
-                    current_part_duration * latest_part_greedy):
-                part_num += 1
-
-            last_et: Optional[timedelta] = None
-            for i in range(part_num):
-                name = f'{part.name}_part{i + 1}'
-                if i == 0:
-                    last_et = st + max_part_length
-                    res.append(VideoPart(name=name, start=st, end=last_et))
-                elif i == part_num - 1:
-                    res.append(VideoPart(name=name, start=last_et - timedelta(seconds=5), end=et))
-                else:
-                    res.append(VideoPart(name=name, start=last_et - timedelta(seconds=5),
-                                         end=last_et + max_part_length))
-                    last_et += max_part_length
-        return res
-
 
 @dataclass_json(letter_case=LetterCase.CAMEL)
 @dataclass
@@ -172,7 +113,7 @@ class FFMpeg:
         if isinstance(input_file, List) and len(input_file) > 1:
             cmd.extend([
                 '-protocol_whitelist', 'file,pipe',
-                '-auto_convert', '1',
+                '-auto_convert', '0',
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', '-'])
@@ -187,6 +128,95 @@ class FFMpeg:
         child = Popen(cmd, stdin=PIPE)
         child.communicate(
             FFMpeg.get_concat_file(input_file) if isinstance(input_file, List) and len(input_file) > 1 else None)
+
+
+def split(parts: List[PartSpec],
+          videos: List[VideoInfo],
+          max_part_length: Optional[timedelta] = None,
+          latest_part_greedy: Optional[float] = None) -> List[VideoPart]:
+    '''
+    按照输入的 parts 返回分割结果
+
+    Args:
+        parts (List[PartSpec]): 分段信息
+        videos (List[VideoInfo]): 输入视频
+        max_part_length (timedelta): 输出分段的长度限制
+        latest_part_greedy (float): 最后一个分段长度的容忍率
+
+    Returns:
+        VideoParts: 每个分段的文件名，开始和结束的绝对时间
+    '''
+
+    # 所有 videos 的绝对时间
+    durations: List[timedelta] = []
+    for video_info in videos:
+        if not durations:
+            durations.append(video_info.duration)
+        else:
+            durations.append(durations[-1] + video_info.duration)
+
+    res: List[VideoPart] = []
+
+    for idx, part in enumerate(parts):
+        if not part.start:
+            # 第一个 part 未指定 start, 使用 0s
+            if idx == 0:
+                st = timedelta()
+            # 其余 part 未指定 start, 使用上一个 part 的 end
+            else:
+                st = res[-1].end
+        # start_idx 未指定或为0或1时，直接使用 start 的值
+        elif not part.start_idx or part.start_idx == 1:
+            st = part.start
+        # 根据 videos 长度计算绝对时间
+        else:
+            st = durations[part.start_idx - 2] + part.start
+
+        if not part.end:
+            # 最后一个 part 未指定 end 时，end 使用视频总时长
+            if idx == len(parts) - 1:
+                et = durations[-1]
+            # 非最后一个 part 未指定 end 时，抛异常
+            else:
+                raise RuntimeError('未指定结束时间')
+        # end_idx 未指定或为0或1时，直接使用 end 的值
+        elif not part.end_idx or part.end_idx == 1:
+            et = part.end
+        # 根据 videos 长度计算绝对时间
+        else:
+            et = durations[part.end_idx - 2] + part.end
+
+        # 当前分段的时长
+        current_part_duration = et - st
+        assert current_part_duration.total_seconds(
+        ) > 0, f'{part.name} 定义错误，时长为 {current_part_duration.total_seconds()}s，应该大于 0s'
+        
+        # 若当前分段时长不超过 max_part_length * (1 + latest_part_greedy) 则不再次分段
+        if not max_part_length or current_part_duration < max_part_length * (
+                1 + latest_part_greedy if latest_part_greedy else 0):
+            res.append(VideoPart(name=part.name, start=st, end=et))
+            continue
+
+        # 根据 max_part_length 算分段数
+        part_num = int(current_part_duration / max_part_length)
+        if not latest_part_greedy or current_part_duration % max_part_length > (
+                current_part_duration * latest_part_greedy):
+            part_num += 1
+
+        last_et: Optional[timedelta] = None
+        for i in range(part_num):
+            name = f'{part.name}_part{i + 1}'
+            if i == 0:
+                last_et = st + max_part_length
+                res.append(VideoPart(name=name, start=st, end=last_et))
+            elif i == part_num - 1:
+                res.append(VideoPart(name=name, start=last_et - timedelta(seconds=5), end=et))
+            else:
+                res.append(VideoPart(name=name, start=last_et - timedelta(seconds=5),
+                                     end=last_et + max_part_length))
+                last_et += max_part_length
+
+    return res
 
 
 def main():
@@ -214,12 +244,13 @@ def main():
                     ffmpeg_bin=cfg.ffmpeg_bin,
                     c='copy'
                 )
-            videos = [VideoInfo(re_mux_file, FFMpeg.get_video_duration(project.workdir / re_mux_file, cfg.ffprobe_bin))]
+            videos = [VideoInfo(re_mux_file, FFMpeg.get_video_duration(
+                project.workdir / re_mux_file, cfg.ffprobe_bin))]
             input_file = str(project.workdir / re_mux_file)
-            post_splited = lambda: os.remove(project.workdir / re_mux_file)
+            def post_splited(): return os.remove(project.workdir / re_mux_file)
 
-        video_parts: List[VideoPart] = project.split(videos, max_part_length=cfg.max_part_length,
-                                                     latest_part_greedy=cfg.latest_part_greedy)
+        video_parts: List[VideoPart] = split(project.parts, videos, max_part_length=cfg.max_part_length,
+                                             latest_part_greedy=cfg.latest_part_greedy)
         print(tabulate([[vp.name, vp.start, vp.end, vp.end - vp.start] for vp in video_parts],
                        ('文件名', '开始时间', '结束时间', '时长')))
         if args.dry_run:
