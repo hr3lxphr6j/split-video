@@ -2,6 +2,7 @@
 import json
 import os
 import re
+from sys import stderr
 from argparse import ArgumentParser
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -13,6 +14,8 @@ from typing import AnyStr, Callable, Dict, List, Optional, Union
 import toml
 from dataclasses_json import LetterCase, config, dataclass_json
 from tabulate import tabulate
+
+DEBUG = False
 
 
 class TimeDeltaHelper:
@@ -108,26 +111,76 @@ class FFMpeg:
         return b
 
     @staticmethod
-    def encode(input_file: Union[List[str], str], output_file: str, ffmpeg_bin: str = 'ffmpeg', **kwargs):
+    def encode(input_files: Union[List[str], str],
+               output_files: Union[List[str], str],
+               ffmpeg_bin: str = 'ffmpeg',
+               concat: bool = True,
+               input_kwargs: Union[List[Dict[str, Optional[str]]], Dict[str, Optional[str]]] = None,
+               output_kwargs: Union[List[Dict[str, Optional[str]]], Dict[str, Optional[str]]] = None) -> None:
+
+        if not isinstance(input_files, List):
+            input_files = [input_files]
+        if not isinstance(output_files, List):
+            output_files = [output_files]
+
+        if input_kwargs and isinstance(input_kwargs, List):
+            if concat and len(input_kwargs) != 1:
+                raise Exception('input_kwargs must be a list of length 1 if concat is true')
+            elif not concat and len(input_kwargs) != len(input_files):
+                raise Exception('input_kwargs and input_file must have the same length when concat is false')
+        elif input_kwargs and isinstance(input_kwargs, Dict):
+            if concat:
+                input_kwargs = [input_kwargs] * len(output_files)
+            else:
+                input_kwargs = [input_kwargs]
+        elif not input_kwargs:
+            input_kwargs = [None] * len(input_files)
+
+        if output_kwargs and isinstance(output_kwargs, List) and len(output_kwargs) != len(output_files):
+            raise Exception('output_kwargs and output_files must have the same length')
+        elif output_kwargs and isinstance(output_kwargs, Dict):
+            output_kwargs = [output_kwargs] * len(output_files)
+        elif not output_kwargs:
+            output_kwargs = [None] * len(output_files)
+
         cmd = [ffmpeg_bin, '-y', '-hide_banner']
-        if isinstance(input_file, List) and len(input_file) > 1:
-            cmd.extend([
+
+        def _append_arg(**kwargs):
+            for k, v in kwargs.items():
+                cmd.append('-' + k.replace('-', '_'))
+                if v:
+                    cmd.append(v)
+
+        if concat:
+            cmd += [
                 '-protocol_whitelist', 'file,pipe',
                 '-auto_convert', '0',
-                '-f', 'concat',
                 '-safe', '0',
-                '-i', '-'])
+                '-f', 'concat',
+                '-i', 'pipe:0',
+            ]
         else:
-            cmd.extend(['-i', input_file if not isinstance(input_file, List) else input_file[0]])
+            for input_file, input_kwarg in zip(input_files, input_kwargs):
+                if not input_kwarg:
+                    input_kwarg = {}
+                _append_arg(**input_kwarg)
+                cmd += ['-i', input_file]
 
-        for k, v in kwargs.items():
-            cmd.append('-' + k.replace('-', '_'))
-            if v:
-                cmd.append(v)
-        cmd.append(output_file)
+        for output_file, output_kwarg in zip(output_files, output_kwargs):
+            if output_kwarg:
+                _append_arg(**output_kwarg)
+            cmd.append(output_file)
+
+        global DEBUG
+        if DEBUG:
+            print(' '.join(cmd), file=stderr)
+            if concat:
+                print('>>> STDIN:', file=stderr)
+                print(FFMpeg.get_concat_file(input_files), file=stderr)
+            return
+
         child = Popen(cmd, stdin=PIPE)
-        child.communicate(
-            FFMpeg.get_concat_file(input_file) if isinstance(input_file, List) and len(input_file) > 1 else None)
+        child.communicate(FFMpeg.get_concat_file(input_files) if concat else None)
 
 
 def split(parts: List[PartSpec],
@@ -190,7 +243,7 @@ def split(parts: List[PartSpec],
         current_part_duration = et - st
         assert current_part_duration.total_seconds(
         ) > 0, f'{part.name} 定义错误，时长为 {current_part_duration.total_seconds()}s，应该大于 0s'
-        
+
         # 若当前分段时长不超过 max_part_length * (1 + latest_part_greedy) 则不再次分段
         if not max_part_length or current_part_duration < max_part_length * (
                 1 + latest_part_greedy if latest_part_greedy else 0):
@@ -222,15 +275,18 @@ def split(parts: List[PartSpec],
 def main():
     parser = ArgumentParser()
     parser.add_argument('-d', '--dry-run', action='store_true', help='仅展示结果，不执行')
+    parser.add_argument('--debug', action='store_true')
     parser.add_argument('file', type=open, help='输入文件')
     args = parser.parse_args()
+    global DEBUG
+    DEBUG = args.debug
 
     cfg: Config = Config.from_dict(toml.load(args.file))
     for project in cfg.projects:
         videos: List[VideoInfo] = [VideoInfo(file, FFMpeg.get_video_duration(project.workdir / file, cfg.ffprobe_bin))
                                    for file in project.files]
         input_file: Union[List[str], str] = [str(project.workdir / file) for file in project.files]
-        post_splited: Optional[Callable] = None
+        post_action: Optional[Callable] = None
         if not args.dry_run and cfg.re_mux_at_first:
             content = '\n'.join([str(project.workdir / v.filename) for v in videos])
             h = sha256()
@@ -239,15 +295,17 @@ def main():
 
             if not Path(project.workdir / re_mux_file).is_file():
                 FFMpeg.encode(
-                    input_file=[str(project.workdir / file) for file in project.files],
-                    output_file=str(project.workdir / re_mux_file),
+                    input_files=[str(project.workdir / file) for file in project.files],
+                    concat=True,
+                    output_files=str(project.workdir / re_mux_file),
                     ffmpeg_bin=cfg.ffmpeg_bin,
-                    c='copy'
+                    output_kwargs={'c': 'copy'},
                 )
             videos = [VideoInfo(re_mux_file, FFMpeg.get_video_duration(
                 project.workdir / re_mux_file, cfg.ffprobe_bin))]
             input_file = str(project.workdir / re_mux_file)
-            def post_splited(): return os.remove(project.workdir / re_mux_file)
+
+            post_action = lambda: os.remove(project.workdir / re_mux_file)
 
         video_parts: List[VideoPart] = split(project.parts, videos, max_part_length=cfg.max_part_length,
                                              latest_part_greedy=cfg.latest_part_greedy)
@@ -255,17 +313,17 @@ def main():
                        ('文件名', '开始时间', '结束时间', '时长')))
         if args.dry_run:
             continue
-        for vp in video_parts:
-            FFMpeg.encode(
-                input_file=input_file,
-                output_file=str(project.workdir / (vp.name + '.mp4')),
-                ffmpeg_bin=cfg.ffmpeg_bin,
-                ss=str(vp.start),
-                to=str(vp.end),
-                **project.ffmpeg_args
-            )
-        if post_splited:
-            post_splited()
+
+        FFMpeg.encode(
+            input_files=input_file,
+            concat=len(input_file) > 1,
+            output_files=[str(project.workdir / (vp.name + '.mp4')) for vp in video_parts],
+            ffmpeg_bin=cfg.ffmpeg_bin,
+            output_kwargs=[{'ss': str(vp.start), 'to': str(vp.end), **project.ffmpeg_args} for vp in video_parts],
+        )
+
+        if post_action:
+            post_action()
 
 
 if __name__ == '__main__':
