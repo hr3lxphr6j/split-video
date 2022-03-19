@@ -3,7 +3,7 @@ import json
 import os
 import re
 from argparse import ArgumentParser
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import timedelta
 from hashlib import sha256
 from pathlib import Path, PurePath
@@ -76,7 +76,9 @@ class ProjectSpec:
     workdir: PurePath = field(metadata=config(decoder=PurePath))
     files: List[str] = None
     parts: List[PartSpec] = None
-    ffmpeg_args: Dict[str, Optional[str]] = field(default_factory=lambda: {'c': 'copy'})
+    ffmpeg_gloable_args: List[str] = field(default_factory=lambda: ['-y', '-hide_banner'])
+    ffmpeg_args: Dict[str, Optional[str]] = field(
+        default_factory=lambda: {'ss': r'{start}', 'to': r'{end}', 'c': 'copy'})
 
 
 @dataclass_json(letter_case=LetterCase.CAMEL)
@@ -116,6 +118,7 @@ class FFMpeg:
                output_files: Union[List[str], str],
                ffmpeg_bin: str = 'ffmpeg',
                concat: bool = True,
+               ffmpeg_gloable_args: List[str] = None,
                input_kwargs: Union[List[Dict[str, Optional[str]]], Dict[str, Optional[str]]] = None,
                output_kwargs: Union[List[Dict[str, Optional[str]]], Dict[str, Optional[str]]] = None) -> None:
 
@@ -144,7 +147,7 @@ class FFMpeg:
         elif not output_kwargs:
             output_kwargs = [None] * len(output_files)
 
-        cmd = [ffmpeg_bin, '-y', '-hide_banner']
+        cmd = [ffmpeg_bin, *ffmpeg_gloable_args]
 
         def _append_arg(**kwargs):
             for k, v in kwargs.items():
@@ -298,6 +301,7 @@ def main():
                 FFMpeg.encode(
                     input_files=[str(project.workdir / file) for file in project.files],
                     concat=True,
+                    ffmpeg_gloable_args=project.ffmpeg_gloable_args,
                     output_files=str(project.workdir / re_mux_file),
                     ffmpeg_bin=cfg.ffmpeg_bin,
                     output_kwargs={'c': 'copy'},
@@ -319,18 +323,21 @@ def main():
             FFMpeg.encode(
                 input_files=input_file,
                 concat=len(input_file) > 1,
+                ffmpeg_gloable_args=project.ffmpeg_gloable_args,
                 output_files=[str(project.workdir / (vp.name + '.mp4')) for vp in video_parts],
                 ffmpeg_bin=cfg.ffmpeg_bin,
-                output_kwargs=[{'ss': str(vp.start), 'to': str(vp.end), **project.ffmpeg_args} for vp in video_parts],
+                output_kwargs=[{k: v.format(**asdict(vp)) for k, v in project.ffmpeg_args.items()}
+                               for vp in video_parts],
             )
         else:
             for vp in video_parts:
                 FFMpeg.encode(
                     input_files=input_file,
                     concat=len(input_file) > 1,
+                    ffmpeg_gloable_args=project.ffmpeg_gloable_args,
                     output_files=str(project.workdir / (vp.name + '.mp4')),
                     ffmpeg_bin=cfg.ffmpeg_bin,
-                    output_kwargs={'ss': str(vp.start), 'to': str(vp.end), **project.ffmpeg_args},
+                    output_kwargs={k: v.format(**asdict(vp)) for k, v in project.ffmpeg_args.items()},
                 )
 
         if post_action:
