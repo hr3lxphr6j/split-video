@@ -2,13 +2,13 @@
 import json
 import os
 import re
-from sys import stderr
 from argparse import ArgumentParser
 from dataclasses import dataclass, field
 from datetime import timedelta
 from hashlib import sha256
 from pathlib import Path, PurePath
 from subprocess import PIPE, Popen
+from sys import stderr
 from typing import AnyStr, Callable, Dict, List, Optional, Union
 
 import toml
@@ -86,7 +86,8 @@ class Config:
     ffprobe_bin: str = 'ffprobe'
     max_part_length: Optional[timedelta] = field(default=None, metadata=TimeDeltaHelper.dataclass_json_config())
     latest_part_greedy: Optional[float] = None
-    re_mux_at_first: bool = False
+    one_shot: Optional[bool] = False
+    re_mux_at_first: Optional[bool] = False
     projects: List[ProjectSpec] = None
 
 
@@ -305,7 +306,7 @@ def main():
                 project.workdir / re_mux_file, cfg.ffprobe_bin))]
             input_file = str(project.workdir / re_mux_file)
 
-            post_action = lambda: os.remove(project.workdir / re_mux_file)
+            def post_action(): return os.remove(project.workdir / re_mux_file)
 
         video_parts: List[VideoPart] = split(project.parts, videos, max_part_length=cfg.max_part_length,
                                              latest_part_greedy=cfg.latest_part_greedy)
@@ -314,13 +315,23 @@ def main():
         if args.dry_run:
             continue
 
-        FFMpeg.encode(
-            input_files=input_file,
-            concat=len(input_file) > 1,
-            output_files=[str(project.workdir / (vp.name + '.mp4')) for vp in video_parts],
-            ffmpeg_bin=cfg.ffmpeg_bin,
-            output_kwargs=[{'ss': str(vp.start), 'to': str(vp.end), **project.ffmpeg_args} for vp in video_parts],
-        )
+        if cfg.one_shot:
+            FFMpeg.encode(
+                input_files=input_file,
+                concat=len(input_file) > 1,
+                output_files=[str(project.workdir / (vp.name + '.mp4')) for vp in video_parts],
+                ffmpeg_bin=cfg.ffmpeg_bin,
+                output_kwargs=[{'ss': str(vp.start), 'to': str(vp.end), **project.ffmpeg_args} for vp in video_parts],
+            )
+        else:
+            for vp in video_parts:
+                FFMpeg.encode(
+                    input_files=input_file,
+                    concat=len(input_file) > 1,
+                    output_files=str(project.workdir / (vp.name + '.mp4')),
+                    ffmpeg_bin=cfg.ffmpeg_bin,
+                    output_kwargs={'ss': str(vp.start), 'to': str(vp.end), **project.ffmpeg_args},
+                )
 
         if post_action:
             post_action()
