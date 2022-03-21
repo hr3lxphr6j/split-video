@@ -71,6 +71,10 @@ maxPartLength = "01:00:00"
 latestPartGreedy = 0.1
 # 可选，在开始前将所有输入文件先连接为一个，之后用这个文件来执行分卷。在对一堆flv执行分卷时，打开这个会加快速度
 reMuxAtFirst = false
+# 可选，当为 true 时使用 ffmpeg 多个输出文件的模式，否则为每个输出文件执行一次（在重编码模式下没有进度输出，ffmpeg的bug？）
+one_shot = false
+# 可选，ffmpeg 的全局参数，默认值如下
+ffmpeg_gloable_args = ['-y', '-hide_banner']
 
 [[projects]]
 # 输入文件所在目录
@@ -81,6 +85,16 @@ files = [
     "[2021-10-30 20-56-01][周逸逸哦啦啦][今晚把树脂肝完].mp4",
     "[2021-10-30 18-37-23][周逸逸哦啦啦][今晚把树脂肝完].mp4"
 ]
+
+# 可选，自定义 ffmpeg 的输出文件参数，默认为流复制模式（-c copy）
+[projects.ffmpeg_args]
+ss = '{start}'
+to = '{end}'
+"c:v" = 'libx264'
+crf = '24'
+"c:a" = 'aac'
+"b:a" = "128k"
+
 [[projects.parts]]
 # 分P的名字
 name = "原神"
