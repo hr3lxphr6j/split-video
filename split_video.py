@@ -151,7 +151,7 @@ class FFMpeg:
 
         def _append_arg(**kwargs):
             for k, v in kwargs.items():
-                cmd.append('-' + k.replace('_', '-'))
+                cmd.append('-' + k)
                 if v:
                     cmd.append(v)
 
