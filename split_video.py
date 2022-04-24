@@ -1,8 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import json
 import os
 import re
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass, field, asdict
 from datetime import timedelta
 from hashlib import sha256
@@ -10,6 +10,7 @@ from pathlib import Path, PurePath
 from subprocess import PIPE, Popen
 from sys import stderr
 from typing import AnyStr, Callable, Dict, List, Optional, Union
+from abc import ABC, abstractmethod
 
 import toml
 from dataclasses_json import LetterCase, config, dataclass_json
@@ -73,7 +74,7 @@ class PartSpec:
 @dataclass_json(letter_case=LetterCase.CAMEL)
 @dataclass
 class ProjectSpec:
-    workdir: PurePath = field(metadata=config(decoder=PurePath))
+    workdir: PurePath = field(metadata=config(decoder=PurePath, encoder=str))
     files: List[str] = None
     parts: List[PartSpec] = None
     ffmpeg_gloable_args: List[str] = field(default_factory=lambda: ['-y', '-hide_banner'])
@@ -276,72 +277,126 @@ def split(parts: List[PartSpec],
     return res
 
 
-def main():
-    parser = ArgumentParser()
-    parser.add_argument('-d', '--dry-run', action='store_true', help='仅展示结果，不执行')
-    parser.add_argument('--debug', action='store_true')
-    parser.add_argument('file', type=open, help='输入文件')
-    args = parser.parse_args()
-    global DEBUG
-    DEBUG = args.debug
+class AbsCmd(ABC):
+    @staticmethod
+    @abstractmethod
+    def reg_arg_parser(parser: ArgumentParser):
+        pass
 
-    cfg: Config = Config.from_dict(toml.load(args.file))
-    for project in cfg.projects:
-        videos: List[VideoInfo] = [VideoInfo(file, FFMpeg.get_video_duration(project.workdir / file, cfg.ffprobe_bin))
-                                   for file in project.files]
-        input_file: Union[List[str], str] = [str(project.workdir / file) for file in project.files]
-        post_action: Optional[Callable] = None
-        if not args.dry_run and cfg.re_mux_at_first:
-            content = '\n'.join([str(project.workdir / v.filename) for v in videos])
-            h = sha256()
-            h.update(content.encode())
-            re_mux_file = f'{h.hexdigest()}.mp4'
+    @staticmethod
+    @abstractmethod
+    def run(args: Namespace):
+        pass
 
-            if not Path(project.workdir / re_mux_file).is_file():
-                FFMpeg.encode(
-                    input_files=[str(project.workdir / file) for file in project.files],
-                    concat=True,
-                    ffmpeg_gloable_args=project.ffmpeg_gloable_args,
-                    output_files=str(project.workdir / re_mux_file),
-                    ffmpeg_bin=cfg.ffmpeg_bin,
-                    output_kwargs={'c': 'copy'},
-                )
-            videos = [VideoInfo(re_mux_file, FFMpeg.get_video_duration(
-                project.workdir / re_mux_file, cfg.ffprobe_bin))]
-            input_file = str(project.workdir / re_mux_file)
 
-            def post_action(): return os.remove(project.workdir / re_mux_file)
+class ScaffoldCmd(AbsCmd):
+    sub_cmd_name = 'scaffold'
+    sub_cmd_aliases = ['sc']
 
-        video_parts: List[VideoPart] = split(project.parts, videos, max_part_length=cfg.max_part_length,
-                                             latest_part_greedy=cfg.latest_part_greedy)
-        print(tabulate([[vp.name, vp.start, vp.end, vp.end - vp.start] for vp in video_parts],
-                       ('文件名', '开始时间', '结束时间', '时长')))
-        if args.dry_run:
-            continue
+    @staticmethod
+    def reg_arg_parser(parser: ArgumentParser):
+        parser.add_argument('-o', '--output', required=True)
+        parser.add_argument('files', nargs='*')
+        parser.set_defaults(_func=ScaffoldCmd.run)
 
-        if cfg.one_shot:
-            FFMpeg.encode(
-                input_files=input_file,
-                concat=len(input_file) > 1,
-                ffmpeg_gloable_args=project.ffmpeg_gloable_args,
-                output_files=[str(project.workdir / (vp.name + '.mp4')) for vp in video_parts],
-                ffmpeg_bin=cfg.ffmpeg_bin,
-                output_kwargs=[{k: v.format(**asdict(vp)) for k, v in project.ffmpeg_args.items()}
-                               for vp in video_parts],
-            )
-        else:
-            for vp in video_parts:
+    @staticmethod
+    def run(args: Namespace):
+        cfg = Config()
+        cfg.projects = [ProjectSpec(workdir=PurePath('.'), files=args.files)]
+        with open(args.output, 'w+') as fd:
+            toml.dump(cfg.to_dict(), fd)
+
+
+class SplitCmd(AbsCmd):
+    sub_cmd_name = 'split'
+    sub_cmd_aliases = ['sp']
+
+    @staticmethod
+    def reg_arg_parser(parser: ArgumentParser):
+        parser.add_argument('-d', '--dry-run', action='store_true', help='仅展示结果，不执行')
+        parser.add_argument('file', help='输入文件')
+        parser.set_defaults(_func=ScaffoldCmd.run)
+
+    @staticmethod
+    def run(args: Namespace):
+        with open(args.file) as fd:
+            cfg: Config = Config.from_dict(toml.load(fd))
+        for project in cfg.projects:
+            videos: List[VideoInfo] = [
+                VideoInfo(file, FFMpeg.get_video_duration(project.workdir / file, cfg.ffprobe_bin))
+                for file in project.files]
+            input_file: Union[List[str], str] = [str(project.workdir / file) for file in project.files]
+            post_action: Optional[Callable] = None
+            if not args.dry_run and cfg.re_mux_at_first:
+                content = '\n'.join([str(project.workdir / v.filename) for v in videos])
+                h = sha256()
+                h.update(content.encode())
+                re_mux_file = f'{h.hexdigest()}.mp4'
+
+                if not Path(project.workdir / re_mux_file).is_file():
+                    FFMpeg.encode(
+                        input_files=[str(project.workdir / file) for file in project.files],
+                        concat=True,
+                        ffmpeg_gloable_args=project.ffmpeg_gloable_args,
+                        output_files=str(project.workdir / re_mux_file),
+                        ffmpeg_bin=cfg.ffmpeg_bin,
+                        output_kwargs={'c': 'copy'},
+                    )
+                videos = [VideoInfo(re_mux_file, FFMpeg.get_video_duration(
+                    project.workdir / re_mux_file, cfg.ffprobe_bin))]
+                input_file = str(project.workdir / re_mux_file)
+
+                def post_action():
+                    return os.remove(project.workdir / re_mux_file)
+
+            video_parts: List[VideoPart] = split(project.parts, videos, max_part_length=cfg.max_part_length,
+                                                 latest_part_greedy=cfg.latest_part_greedy)
+            print(tabulate([[vp.name, vp.start, vp.end, vp.end - vp.start] for vp in video_parts],
+                           ('文件名', '开始时间', '结束时间', '时长')))
+            if args.dry_run:
+                continue
+
+            if cfg.one_shot:
                 FFMpeg.encode(
                     input_files=input_file,
                     concat=len(input_file) > 1,
                     ffmpeg_gloable_args=project.ffmpeg_gloable_args,
-                    output_files=str(project.workdir / (vp.name + '.mp4')),
+                    output_files=[str(project.workdir / (vp.name + '.mp4')) for vp in video_parts],
                     ffmpeg_bin=cfg.ffmpeg_bin,
-                    output_kwargs={k: v.format(**asdict(vp)) for k, v in project.ffmpeg_args.items()},
+                    output_kwargs=[{k: v.format(**asdict(vp)) for k, v in project.ffmpeg_args.items()}
+                                   for vp in video_parts],
                 )
+            else:
+                for vp in video_parts:
+                    FFMpeg.encode(
+                        input_files=input_file,
+                        concat=len(input_file) > 1,
+                        ffmpeg_gloable_args=project.ffmpeg_gloable_args,
+                        output_files=str(project.workdir / (vp.name + '.mp4')),
+                        ffmpeg_bin=cfg.ffmpeg_bin,
+                        output_kwargs={k: v.format(**asdict(vp)) for k, v in project.ffmpeg_args.items()},
+                    )
 
-        if post_action:
-            post_action()
+            if post_action:
+                post_action()
+
+
+def main():
+    root_parser = ArgumentParser()
+    root_parser.add_argument('--debug', action='store_true')
+    sps = root_parser.add_subparsers()
+    for sub_cmd in (ScaffoldCmd, SplitCmd):
+        sub_cmd.reg_arg_parser(sps.add_parser(sub_cmd.sub_cmd_name, aliases=sub_cmd.sub_cmd_aliases or None))
+
+    args = root_parser.parse_args()
+    global DEBUG
+    DEBUG = args.debug
+
+    if '_func' not in args:
+        root_parser.print_help()
+        exit(1)
+
+    args._func(args)
 
 
 if __name__ == '__main__':

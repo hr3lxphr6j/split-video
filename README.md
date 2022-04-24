@@ -18,7 +18,7 @@ pip install -r requirements.txt
 ## 使用例子
 
 ```shell
-python3 split_video.py input.toml
+python3 split_video.py split input.toml
 ```
 
 ```toml
