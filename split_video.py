@@ -315,7 +315,7 @@ class SplitCmd(AbsCmd):
     def reg_arg_parser(parser: ArgumentParser):
         parser.add_argument('-d', '--dry-run', action='store_true', help='仅展示结果，不执行')
         parser.add_argument('file', help='输入文件')
-        parser.set_defaults(_func=ScaffoldCmd.run)
+        parser.set_defaults(_func=SplitCmd.run)
 
     @staticmethod
     def run(args: Namespace):
